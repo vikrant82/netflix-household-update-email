@@ -20,13 +20,18 @@ Basic installation instruction
 
 ### Prerequisites
 
-As the script uses selenium to interact with the browser, the chromedriver is needed.
-Please download the correct chromedriver for your current Chrome version from here:
-https://chromedriver.chromium.org/downloads
-Specify the path to the chromedriver executable in the config.ini file.
+**Chrome/Chromium Browser:**
+The script requires Chrome or Chromium browser to be installed on your system.
 
-Alternatively, the chromedriver-py package can be used to automatically download the latest chromedriver.
-To do so, set the *UseChromedriverPy = True* option in the config.ini file.
+**ChromeDriver (Automatic - Recommended):**
+The script uses Selenium 4's automatic ChromeDriver management by default, which automatically downloads the correct ChromeDriver version matching your Chrome browser. No manual setup needed!
+
+**ChromeDriver (Manual - Optional):**
+If you prefer manual control, you can:
+1. Download ChromeDriver manually from https://chromedriver.chromium.org/downloads
+2. Set the path in `config.ini`: `ExecutablePath = /path/to/chromedriver`
+
+**Note:** The `chromedriver-py` package is no longer recommended due to frequent version mismatches.
 
 ### Installation
 
@@ -38,9 +43,26 @@ To install all dependencies, simply install the requirements first:
 
 Make sure to fill out the config.ini file with the correct parameters for your email mailbox and Netflix credentials first!
 
-To run the script, simply execute the following command:
+#### Manual Run with Virtual Environment
 
-    python netflix_household_update.py
+For testing or manual operation, it's recommended to use a virtual environment:
+
+```bash
+# Create virtual environment
+python -m venv .venv
+
+# Activate virtual environment
+# On Linux/macOS:
+source .venv/bin/activate
+# On Windows:
+# .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the script
+python netflix_household_update.py
+```
 
 The script will:
 1. Connect to your IMAP server
@@ -53,6 +75,60 @@ The script will:
 The script can be stopped by pressing **Ctrl+C**
 
 **Note:** Most email providers (Gmail, Outlook, iCloud, etc.) support IMAP IDLE, giving you instant notifications with zero waiting time!
+
+#### Running in Background (Optional)
+
+If you want to run the script in the background without keeping a terminal open:
+
+**Using screen (recommended for remote servers):**
+```bash
+# Install screen if needed
+sudo apt-get install screen  # Debian/Ubuntu
+# or
+brew install screen  # macOS
+
+# Start a screen session
+screen -S netflix
+
+# Run the script (in the screen session)
+source .venv/bin/activate
+python netflix_household_update.py
+
+# Detach from screen: Press Ctrl+A, then D
+# To reattach later: screen -r netflix
+# To list sessions: screen -ls
+```
+
+**Using tmux:**
+```bash
+# Install tmux if needed
+sudo apt-get install tmux  # Debian/Ubuntu
+
+# Start a tmux session
+tmux new -s netflix
+
+# Run the script
+source .venv/bin/activate
+python netflix_household_update.py
+
+# Detach from tmux: Press Ctrl+B, then D
+# To reattach later: tmux attach -t netflix
+```
+
+**Using nohup (simple background process):**
+```bash
+# Run in background with output to nohup.out
+nohup .venv/bin/python netflix_household_update.py &
+
+# Or redirect output to custom log
+nohup .venv/bin/python netflix_household_update.py > output.log 2>&1 &
+
+# Check if it's running
+ps aux | grep netflix_household_update
+
+# Stop the process
+pkill -f netflix_household_update.py
+```
 
 ### Installation on Raspberry Pi
 
@@ -120,4 +196,8 @@ MailboxName = Netflix
 - **Script stops after a day**: This should no longer happen due to memory management improvements
 - **No email notifications**: Check that your config.ini has correct IMAP credentials and server
 - **IDLE not working**: Script will automatically fall back to polling - check logs for "IDLE not supported" message
-- **ChromeDriver errors**: Ensure ChromeDriver matches your Chrome version, or set `UseChromedriverPy = True` in config.ini
+- **ChromeDriver version mismatch** (e.g., "This version of ChromeDriver only supports Chrome version X"):
+  - **Solution**: Set `UseChromedriverPy = False` in config.ini (or remove the line entirely)
+  - This enables Selenium's automatic ChromeDriver management which always downloads the correct version
+  - The script will handle ChromeDriver automatically on next run
+- **Gmail IMAP issues**: Ensure you're using an App Password (not your regular Gmail password) and IMAP is enabled in Gmail settings

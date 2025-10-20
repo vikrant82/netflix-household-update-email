@@ -18,7 +18,12 @@ from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from chromedriver_py import binary_path
+try:
+	from chromedriver_py import binary_path
+	CHROMEDRIVER_PY_AVAILABLE = True
+except ImportError:
+	CHROMEDRIVER_PY_AVAILABLE = False
+	binary_path = None
 
 # --- Constants ---
 SENDER_EMAILS = ['info@account.netflix.com']
@@ -107,8 +112,22 @@ class NetflixLocationUpdate:
 		self._mailbox_name = self._config.get('EMAIL', 'Mailbox', fallback='INBOX')
 		self._netflix_username = self._config.get('NETFLIX', 'Username')
 		self._netflix_password = self._config.get('NETFLIX', 'Password')
-		use_chromedriver_py = self._config.getboolean('CHROMEDRIVER', 'UseChromedriverPy', fallback=True)
-		self._chromedriver_path = binary_path if use_chromedriver_py else self._config.get('CHROMEDRIVER', 'ExecutablePath')
+		
+		# ChromeDriver configuration
+		use_chromedriver_py = self._config.getboolean('CHROMEDRIVER', 'UseChromedriverPy', fallback=False)  # Changed default to False
+		if use_chromedriver_py and CHROMEDRIVER_PY_AVAILABLE:
+			self._chromedriver_path = binary_path
+		elif use_chromedriver_py and not CHROMEDRIVER_PY_AVAILABLE:
+			logging.warning("UseChromedriverPy=True but chromedriver-py not installed. Using Selenium's automatic ChromeDriver management.")
+			self._chromedriver_path = None  # Selenium will auto-manage
+		else:
+			# Try to get manual path, otherwise use automatic
+			try:
+				self._chromedriver_path = self._config.get('CHROMEDRIVER', 'ExecutablePath')
+			except (configparser.NoOptionError, configparser.NoSectionError):
+				logging.info("No ExecutablePath specified. Using Selenium's automatic ChromeDriver management.")
+				self._chromedriver_path = None
+		
 		self._move_to_mailbox = self._config.getboolean('GENERAL', 'MoveEmailsToMailbox', fallback=False)
 		self._move_to_mailbox_name = self._config.get('GENERAL', 'MailboxName', fallback='Netflix')
 
@@ -117,14 +136,22 @@ class NetflixLocationUpdate:
 	def _init_webdriver(self) -> Optional[webdriver.Chrome]:
 		"""Initializes and returns a Selenium Chrome WebDriver instance."""
 		try:
-			logging.info(f"Initializing WebDriver with path: {self._chromedriver_path}")
-			svc = webdriver.ChromeService(executable_path=self._chromedriver_path)
 			chrome_options = webdriver.ChromeOptions()
 			chrome_options.add_argument("--headless")
 			chrome_options.add_argument("--disable-gpu")
 			chrome_options.add_argument("--no-sandbox")
 			chrome_options.add_argument("--disable-dev-shm-usage")
-			driver = webdriver.Chrome(options=chrome_options, service=svc)
+			
+			if self._chromedriver_path:
+				# Use specified ChromeDriver path
+				logging.info(f"Initializing WebDriver with path: {self._chromedriver_path}")
+				svc = webdriver.ChromeService(executable_path=self._chromedriver_path)
+				driver = webdriver.Chrome(options=chrome_options, service=svc)
+			else:
+				# Use Selenium's automatic ChromeDriver management (Selenium 4+)
+				logging.info("Initializing WebDriver with automatic ChromeDriver management")
+				driver = webdriver.Chrome(options=chrome_options)
+			
 			logging.info("WebDriver initialized successfully.")
 			return driver
 		except Exception as e:
@@ -427,7 +454,7 @@ class NetflixLocationUpdate:
 			return
 
 		# 2. Add to Cache and Fetch Content
-		self._processed_email_uids.add(uid)
+		self._processed_email_uids.append(uid)  # deque uses append, not add
 		logging.info(f"Processing new email UID {uid.decode()} (Sequence ID: {email_id.decode()})")
 		raw_email = self._fetch_email_content(email_id)
 		if not raw_email:
