@@ -142,6 +142,31 @@ class NetflixLocationUpdate:
 			chrome_options.add_argument("--no-sandbox")
 			chrome_options.add_argument("--disable-dev-shm-usage")
 			
+			# Aggressive performance optimizations for 2-3s page loads
+			chrome_options.add_argument("--disable-extensions")
+			chrome_options.add_argument("--disable-images")
+			chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+			chrome_options.add_argument("--disable-plugins")
+			chrome_options.add_argument("--disable-plugins-discovery")
+			chrome_options.add_argument("--disable-web-security")
+			chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+			chrome_options.add_argument("--disable-background-networking")
+			chrome_options.add_argument("--disable-background-timer-throttling")
+			chrome_options.add_argument("--disable-client-side-phishing-detection")
+			chrome_options.add_argument("--disable-default-apps")
+			chrome_options.add_argument("--disable-hang-monitor")
+			chrome_options.add_argument("--disable-popup-blocking")
+			chrome_options.add_argument("--disable-prompt-on-repost")
+			chrome_options.add_argument("--disable-sync")
+			chrome_options.add_argument("--metrics-recording-only")
+			chrome_options.add_argument("--no-first-run")
+			chrome_options.page_load_strategy = 'eager'  # Don't wait for all resources
+			
+			# Additional speed improvements
+			chrome_options.add_experimental_option("prefs", {
+				"profile.managed_default_content_settings.images": 2,  # Disable images
+			})
+			
 			if self._chromedriver_path:
 				# Use specified ChromeDriver path
 				logging.info(f"Initializing WebDriver with path: {self._chromedriver_path}")
@@ -151,6 +176,10 @@ class NetflixLocationUpdate:
 				# Use Selenium's automatic ChromeDriver management (Selenium 4+)
 				logging.info("Initializing WebDriver with automatic ChromeDriver management")
 				driver = webdriver.Chrome(options=chrome_options)
+			
+			# Set aggressive timeouts for fast operation
+			driver.set_page_load_timeout(5)  # Max 5 seconds for page load
+			driver.implicitly_wait(0)  # Don't use implicit waits (we use explicit waits)
 			
 			logging.info("WebDriver initialized successfully.")
 			return driver
@@ -226,13 +255,21 @@ class NetflixLocationUpdate:
 			return False
 		
 		try:
-			# Check server capabilities
+			# Need to select a mailbox first to get accurate capabilities
+			try:
+				self._mail.select(self._mailbox_name)
+			except Exception:
+				pass  # Ignore if already selected
+			
+			# Check server capabilities (Gmail returns IDLE in capabilities)
 			capabilities = self._mail.capabilities
 			self._idle_supported = b'IDLE' in capabilities
+			
 			if self._idle_supported:
 				logging.info("IMAP server supports IDLE (push notifications)")
 			else:
-				logging.warning("IMAP server does NOT support IDLE. Will use polling fallback.")
+				logging.warning(f"IMAP server does NOT support IDLE. Capabilities: {capabilities}")
+				logging.warning("Will use polling fallback.")
 			return self._idle_supported
 		except Exception as e:
 			logging.warning(f"Failed to check IDLE capability: {e}. Assuming not supported.")
@@ -627,41 +664,42 @@ class NetflixLocationUpdate:
 		logging.info(f"Selenium: Navigating to update link...")
 		try:
 			self._driver.get(update_link)
-			# Use WebDriverWait for key elements instead of fixed sleeps
-			wait = WebDriverWait(self._driver, 20) # Increased wait time
+			
+			# Aggressive wait times for fast operation (expecting 2-3s page loads)
+			quick_wait = WebDriverWait(self._driver, 2)  # For instant checks
+			fast_wait = WebDriverWait(self._driver, 5)  # For page elements
 
-			# Check if login is needed (wait for email field)
+			# Check if login is needed (quick check - 2 seconds max)
 			try:
-				# Wait briefly for login elements to appear
-				login_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="userLoginId"]')))
+				login_input = quick_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="userLoginId"]')))
 				logging.info('Login required. Attempting to login to Netflix account.')
 				if self._netflix_login():
-					# Wait for potential redirect or page update after login
-					# Check for the button again after potential login success
-					wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, f'button[{BUTTON_SEARCH_ATTR_NAME}="{BUTTON_SEARCH_ATTR_VALUE}"]')))
+					# Wait for button after login
+					fast_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, f'button[{BUTTON_SEARCH_ATTR_NAME}="{BUTTON_SEARCH_ATTR_VALUE}"]')))
 					logging.info("Login successful, proceeding to click button.")
 				else:
 					logging.error("Netflix login failed. Cannot proceed with update.")
 					return False
-			except Exception: # Catches TimeoutException if login field not found
-				logging.info('Login form not found, assuming already logged in or page structure differs.')
-				# Proceed assuming we might be on the target page
+			except Exception:
+				# No login needed - proceed directly to button
+				pass
 
 			# Find and click the confirmation button
 			button_selector = f'button[{BUTTON_SEARCH_ATTR_NAME}="{BUTTON_SEARCH_ATTR_VALUE}"]'
-			logging.info(f"Attempting to find and click button with selector: {button_selector}")
+			logging.info(f"Looking for button: {button_selector}")
 			try:
-				# Wait for the button to be clickable
-				button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, button_selector)))
-				logging.info("Update button found and clickable. Clicking...")
+				# Wait for button to be clickable (5 seconds max)
+				button = fast_wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, button_selector)))
+				logging.info("Update button found. Clicking...")
 				button.click()
-				# Add a small wait or check for a success message if possible
-				time.sleep(3) # Short pause after click to allow action
-				# TODO: Ideally, check for a success element here instead of sleep
+				# Minimal wait to ensure click registers
+				time.sleep(0.5)
 				logging.info("Successfully clicked the update button.")
 				return True
-			except Exception as e: # Catches TimeoutException, NoSuchElementException etc.
-				logging.error(f"Could not find or click the update button using selector: {button_selector}. Error: {e}", exc_info=True)
+			except Exception as e:
+				logging.error(f"Could not find or click button: {e}")
+				# Log current URL for debugging
+				logging.error(f"Current URL: {self._driver.current_url}")
 				return False
 
 		except Exception as e:
@@ -672,7 +710,7 @@ class NetflixLocationUpdate:
 		"""Performs login on the Netflix page using configured credentials."""
 		if not self._driver: return False
 		try:
-			wait = WebDriverWait(self._driver, 10)
+			wait = WebDriverWait(self._driver, 5)
 			email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="userLoginId"]')))
 			password_field = self._driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
 			login_button = self._driver.find_element(By.CSS_SELECTOR, 'button[data-uia="login-submit-button"]')
@@ -681,21 +719,22 @@ class NetflixLocationUpdate:
 			email_field.send_keys(self._netflix_username)
 			password_field.clear()
 			password_field.send_keys(self._netflix_password)
-			login_button.click() # Use click instead of Keys.RETURN for reliability
-			logging.info("Login submitted.")
-			# Wait briefly for login process or error message
-			time.sleep(3)
-			# Check if login failed (e.g., error message appears) - Optional but good
+			logging.info("Submitting login...")
+			login_button.click()
+			
+			# Minimal wait for either error message or successful redirect
+			time.sleep(1)
+			
+			# Check if login failed (error message appears)
 			try:
-				# Example: Check for a common login error message element
 				self._driver.find_element(By.CSS_SELECTOR, '[data-uia="login-error-message"]')
 				logging.error("Login failed: Error message detected on page.")
 				return False
 			except NoSuchElementException:
-				# No error message found, assume login might be proceeding
-				pass
-			return True
-		except Exception as e: # Catch TimeoutException, NoSuchElementException etc.
+				# No error message = login successful
+				logging.info("Login appears successful.")
+				return True
+		except Exception as e:
 			logging.error(f"Error during Netflix login attempt: {e}", exc_info=True)
 			return False
 
