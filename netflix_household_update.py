@@ -164,7 +164,7 @@ class NetflixLocationUpdate:
 			
 			# Additional speed improvements
 			chrome_options.add_experimental_option("prefs", {
-				"profile.managed_default_content_settings.images": 2,  # Disable images
+				"profile.managed_default_content_settings.images": 2,  # Disable images only
 			})
 			
 			if self._chromedriver_path:
@@ -308,13 +308,12 @@ class NetflixLocationUpdate:
 			logging.info(f"Entered IDLE mode. Waiting for new emails (timeout: {IMAP_IDLE_TIMEOUT_SECONDS}s)...")
 			
 			# Wait for notification or timeout
-			start_time = time.time()
+			# Set socket timeout to match IDLE timeout (28 minutes)
+			self._mail.sock.settimeout(IMAP_IDLE_TIMEOUT_SECONDS)
 			new_email_arrived = False
 			
-			while time.time() - start_time < IMAP_IDLE_TIMEOUT_SECONDS:
-				# Set a short socket timeout for responsiveness
-				self._mail.sock.settimeout(10)
-				try:
+			try:
+				while True:
 					line = self._mail.readline()
 					if line:
 						line_str = line.decode('utf-8', errors='ignore')
@@ -323,12 +322,12 @@ class NetflixLocationUpdate:
 							logging.info(f"New email notification received: {line_str.strip()}")
 							new_email_arrived = True
 							break
-				except socket.timeout:
-					# No data received, continue waiting
-					continue
-				except Exception as e:
-					logging.warning(f"Error while waiting in IDLE: {e}")
-					break
+			except socket.timeout:
+				# Normal timeout after 28 minutes - time to refresh IDLE
+				logging.debug("IDLE timeout reached, will refresh connection")
+			except Exception as e:
+				logging.warning(f"Error while waiting in IDLE: {e}")
+				new_email_arrived = False
 			
 			# Exit IDLE mode
 			self._mail.send(b'DONE\r\n')
@@ -712,10 +711,13 @@ class NetflixLocationUpdate:
 		if not self._driver: return False
 		try:
 			wait = WebDriverWait(self._driver, 5)
+			
+			# Wait for all login elements to be present before interacting
 			email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="userLoginId"]')))
-			password_field = self._driver.find_element(By.CSS_SELECTOR, 'input[name="password"]')
-			login_button = self._driver.find_element(By.CSS_SELECTOR, 'button[data-uia="login-submit-button"]')
+			password_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="password"]')))
+			login_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-uia="login-submit-button"]')))
 
+			logging.info("All login elements found, entering credentials...")
 			email_field.clear()
 			email_field.send_keys(self._netflix_username)
 			password_field.clear()
@@ -737,6 +739,7 @@ class NetflixLocationUpdate:
 				return True
 		except Exception as e:
 			logging.error(f"Error during Netflix login attempt: {e}", exc_info=True)
+			logging.error(f"Current URL during login failure: {self._driver.current_url if self._driver else 'N/A'}")
 			return False
 
 	def _manage_processed_email(self, email_id: bytes, uid: bytes):
