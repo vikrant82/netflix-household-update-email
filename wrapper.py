@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional # Added import for Optional
 
 # --- Configuration ---
-TARGET_SCRIPT_NAME = "netflix_household_update_final_reduced_logging.py" # The script to run and restart
+TARGET_SCRIPT_NAME = "netflix_household_update.py" # The script to run and restart
 # How often to restart the target script (e.g., every 4 hours)
 RESTART_INTERVAL_HOURS = 1
 RESTART_INTERVAL_SECONDS = RESTART_INTERVAL_HOURS * 60 * 60

@@ -1,15 +1,18 @@
 # Netflix Household Updater
 
-*Netflix Location Updater* is an easy to use python script to automatically fetch the location update 
-Email from an Email mailbox and click the confirmation link in it.
-Script can easily run on a Raspberry Pi.
+*Netflix Household Updater* is an easy to use Python script to automatically fetch Netflix household location update 
+emails from your mailbox and click the confirmation link instantly.
+The script runs indefinitely and can easily be deployed on a Raspberry Pi or server.
 
 ## Features
 
-- Automatically polling of Email mailbox for given polling intervall
-- Netflix Email fetching and automatically household confirmation
-- Moving the Netflix Email into a separate subfolder of mailbox
-- Logging file with info and error messages
+- **IMAP IDLE support** - Instant email notifications (push) instead of polling for near-zero latency
+- **Automatic fallback** - Uses 5-second polling if IMAP server doesn't support IDLE
+- **Memory leak protection** - Periodic WebDriver refresh and bounded email cache
+- **Log rotation** - Automatic log file rotation (10MB max, 5 backups)
+- **Automatic household confirmation** - Clicks Netflix update link without manual intervention
+- **Email organization** - Moves processed Netflix emails to a separate folder (optional)
+- **Runs indefinitely** - Designed for long-term unattended operation
 
 ## Quickstart
 
@@ -33,14 +36,23 @@ To install all dependencies, simply install the requirements first:
 
 ### Usage
 
-Make sure to fill out the config.ini file with the correct parameters for the Email mailbox, first!
+Make sure to fill out the config.ini file with the correct parameters for your email mailbox and Netflix credentials first!
 
 To run the script, simply execute the following command:
 
     python netflix_household_update.py
 
-The script will run in an infinite loop and polls the Email mailbox with the default polling time of 2 seconds.
-The script can be aborted by pressing **Ctrl+C**
+The script will:
+1. Connect to your IMAP server
+2. Automatically detect if your email provider supports IMAP IDLE (push notifications)
+3. If IDLE is supported (Gmail, Outlook, most modern providers): Wait for instant email notifications
+4. If IDLE is NOT supported: Poll the mailbox every 5 seconds (configurable in config.ini)
+5. Process Netflix household update emails immediately and click the confirmation link
+6. Run indefinitely with automatic resource management (WebDriver refresh every 6 hours)
+
+The script can be stopped by pressing **Ctrl+C**
+
+**Note:** Most email providers (Gmail, Outlook, iCloud, etc.) support IMAP IDLE, giving you instant notifications with zero waiting time!
 
 ### Installation on Raspberry Pi
 
@@ -72,3 +84,40 @@ Now restart the Raspberry Pi:
     sudo reboot
 
 The script should now be started after each startup and runs in an infinite loop.
+
+## Performance & Reliability Optimizations
+
+The script is designed to run indefinitely without requiring restarts:
+
+### Memory Management
+- **WebDriver Auto-Refresh**: Chrome WebDriver is automatically recreated every 6 hours to prevent memory leaks
+- **Bounded Email Cache**: Only keeps last 100 processed email UIDs in memory (prevents unbounded growth)
+- **Log Rotation**: Automatic log file rotation with max 10MB per file, 5 backup files (50MB total max)
+
+### Efficiency
+- **IMAP IDLE Push Notifications**: When supported by email provider, eliminates constant polling
+  - Instant email processing (0-second delay)
+  - Single persistent connection instead of 17,000+ daily connections
+  - Minimal CPU and network usage
+- **Smart Fallback**: Automatically falls back to 5-second polling if IDLE not supported
+
+### Configuration Options
+
+Add these to your `config.ini` under the `[GENERAL]` section:
+
+```ini
+[GENERAL]
+# Polling interval in seconds (only used if IMAP IDLE is not supported)
+PollingIntervalSeconds = 5
+
+# Move processed emails to a subfolder
+MoveEmailsToMailbox = True
+MailboxName = Netflix
+```
+
+## Troubleshooting
+
+- **Script stops after a day**: This should no longer happen due to memory management improvements
+- **No email notifications**: Check that your config.ini has correct IMAP credentials and server
+- **IDLE not working**: Script will automatically fall back to polling - check logs for "IDLE not supported" message
+- **ChromeDriver errors**: Ensure ChromeDriver matches your Chrome version, or set `UseChromedriverPy = True` in config.ini

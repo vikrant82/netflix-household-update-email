@@ -4,12 +4,14 @@ import email
 import time
 import socket
 import logging
+from logging.handlers import RotatingFileHandler
 import configparser
 import re
 import datetime # Added for timed logging
 import signal # Added for signal handling
 import sys # Added for sys.exit
 from typing import List, Optional, Tuple
+from collections import deque
 from selenium import webdriver
 from selenium.webdriver import Keys
 from selenium.webdriver.common.by import By
@@ -24,13 +26,28 @@ NETFLIX_LINK_START_PATTERNS = ['www.netflix.com/account/update-primary', 'www.ne
 BUTTON_SEARCH_ATTR_NAME = 'data-uia'
 BUTTON_SEARCH_ATTR_VALUE = 'set-primary-location-action'
 LOG_FILENAME = 'status.log'
+IMAP_IDLE_TIMEOUT_SECONDS = 28 * 60  # 28 minutes (IMAP max is 29)
 
 # --- Helper Functions ---
 def setup_logging():
-	"""Configures logging for the script."""
-	logging.basicConfig(filename=LOG_FILENAME, encoding='utf8', level=logging.INFO, # Changed level to INFO
-						format='%(asctime)s %(levelname)-8s %(message)s',
-						datefmt='%Y-%m-%d %H:%M:%S')
+	"""Configures logging for the script with rotation."""
+	# Create rotating file handler: max 10MB per file, keep 5 backups
+	handler = RotatingFileHandler(
+		LOG_FILENAME,
+		maxBytes=10 * 1024 * 1024,  # 10 MB
+		backupCount=5,
+		encoding='utf8'
+	)
+	handler.setFormatter(logging.Formatter(
+		'%(asctime)s %(levelname)-8s %(message)s',
+		datefmt='%Y-%m-%d %H:%M:%S'
+	))
+	
+	# Get root logger and configure it
+	logger = logging.getLogger()
+	logger.setLevel(logging.INFO)
+	logger.addHandler(handler)
+	
 	logging.info('---------------- Script started ----------------')
 
 def close_logging():
@@ -47,7 +64,10 @@ class NetflixLocationUpdate:
 	_config: configparser.ConfigParser
 	_driver: Optional[webdriver.Chrome] = None
 	_mail: Optional[imaplib.IMAP4_SSL] = None
-	_processed_email_uids: set[bytes]
+	_processed_email_uids: deque  # Bounded deque to prevent memory leak
+	_webdriver_creation_time: Optional[datetime.datetime] = None
+	_webdriver_max_age_seconds: int = 6 * 60 * 60  # 6 hours
+	_idle_supported: Optional[bool] = None  # Cache IDLE capability check
 
 	# Configuration attributes
 	_mailbox_name: str
@@ -63,8 +83,9 @@ class NetflixLocationUpdate:
 
 	def __init__(self, config_path: str = 'config.ini'):
 		self._load_config(config_path)
-		self._processed_email_uids = set()
+		self._processed_email_uids = deque(maxlen=100)  # Keep last 100 UIDs only
 		self._driver = self._init_webdriver()
+		self._webdriver_creation_time = datetime.datetime.now()
 		self._connect_imap()
 		self._ensure_target_mailbox_exists()
 
@@ -166,6 +187,107 @@ class NetflixLocationUpdate:
 			return False
 		except Exception as e:
 			logging.error(f"Unexpected error during IMAP NOOP check: {e}", exc_info=True)
+			return False
+
+	def _check_idle_support(self) -> bool:
+		"""Checks if the IMAP server supports IDLE command."""
+		if self._idle_supported is not None:
+			return self._idle_supported  # Return cached result
+		
+		if not self._mail:
+			self._idle_supported = False
+			return False
+		
+		try:
+			# Check server capabilities
+			capabilities = self._mail.capabilities
+			self._idle_supported = b'IDLE' in capabilities
+			if self._idle_supported:
+				logging.info("IMAP server supports IDLE (push notifications)")
+			else:
+				logging.warning("IMAP server does NOT support IDLE. Will use polling fallback.")
+			return self._idle_supported
+		except Exception as e:
+			logging.warning(f"Failed to check IDLE capability: {e}. Assuming not supported.")
+			self._idle_supported = False
+			return False
+
+	def _wait_for_new_email_idle(self) -> bool:
+		"""
+		Waits for new email using IMAP IDLE (push notification).
+		Returns True if new emails arrived, False on timeout or error.
+		"""
+		if not self._mail:
+			return False
+		
+		try:
+			# Select mailbox first
+			status, _ = self._mail.select(self._mailbox_name)
+			if status != 'OK':
+				logging.error(f"Failed to select mailbox '{self._mailbox_name}' for IDLE")
+				return False
+			
+			# Enter IDLE mode
+			tag = self._mail._new_tag().decode()
+			self._mail.send(f'{tag} IDLE\r\n'.encode())
+			
+			# Wait for server to acknowledge IDLE
+			line = self._mail.readline()
+			if b'idling' not in line.lower():
+				logging.warning(f"Unexpected IDLE response: {line}")
+				# Send DONE to exit IDLE
+				self._mail.send(b'DONE\r\n')
+				self._mail.readline()  # Read response
+				return False
+			
+			logging.info(f"Entered IDLE mode. Waiting for new emails (timeout: {IMAP_IDLE_TIMEOUT_SECONDS}s)...")
+			
+			# Wait for notification or timeout
+			start_time = time.time()
+			new_email_arrived = False
+			
+			while time.time() - start_time < IMAP_IDLE_TIMEOUT_SECONDS:
+				# Set a short socket timeout for responsiveness
+				self._mail.sock.settimeout(10)
+				try:
+					line = self._mail.readline()
+					if line:
+						line_str = line.decode('utf-8', errors='ignore')
+						# Check for EXISTS (new email) or RECENT notifications
+						if 'EXISTS' in line_str or 'RECENT' in line_str:
+							logging.info(f"New email notification received: {line_str.strip()}")
+							new_email_arrived = True
+							break
+				except socket.timeout:
+					# No data received, continue waiting
+					continue
+				except Exception as e:
+					logging.warning(f"Error while waiting in IDLE: {e}")
+					break
+			
+			# Exit IDLE mode
+			self._mail.send(b'DONE\r\n')
+			
+			# Read response to DONE
+			try:
+				self._mail.readline()  # Should get OK response
+			except Exception as e:
+				logging.warning(f"Error reading DONE response: {e}")
+			
+			if new_email_arrived:
+				logging.info("IDLE detected new email(s)")
+			else:
+				logging.debug("IDLE timeout reached, refreshing connection")
+			
+			return new_email_arrived
+			
+		except Exception as e:
+			logging.error(f"Error during IMAP IDLE: {e}", exc_info=True)
+			# Try to send DONE in case we're still in IDLE
+			try:
+				self._mail.send(b'DONE\r\n')
+			except Exception:
+				pass
 			return False
 
 	def _ensure_target_mailbox_exists(self):
@@ -395,6 +517,23 @@ class NetflixLocationUpdate:
 			logging.error(f"Error marking email ID {email_id.decode()} as seen: {e}", exc_info=True)
 			# Don't raise, allow processing to continue if possible
 
+	def _refresh_webdriver_if_stale(self):
+		"""Recreates WebDriver if it's too old to prevent memory leaks."""
+		if not self._driver or not self._webdriver_creation_time:
+			return
+		
+		age_seconds = (datetime.datetime.now() - self._webdriver_creation_time).total_seconds()
+		if age_seconds > self._webdriver_max_age_seconds:
+			logging.info(f"WebDriver is {age_seconds / 3600:.1f} hours old. Recreating to prevent memory leaks...")
+			try:
+				self._driver.quit()
+			except Exception as e:
+				logging.warning(f"Error closing old WebDriver: {e}")
+			
+			self._driver = self._init_webdriver()
+			self._webdriver_creation_time = datetime.datetime.now()
+			logging.info("WebDriver recreated successfully.")
+
 	def _parse_email_for_update_link(self, parsed_email: email.message.Message) -> Optional[str]:
 		"""Parses email content to find the Netflix update link."""
 		sender = parsed_email.get('From', '')
@@ -451,6 +590,9 @@ class NetflixLocationUpdate:
 
 	def _handle_netflix_update(self, update_link: str) -> bool:
 		"""Uses Selenium to navigate to the link and click the update button."""
+		# Refresh WebDriver if it's too old to prevent memory leaks
+		self._refresh_webdriver_if_stale()
+		
 		if not self._driver:
 			logging.error("WebDriver is not available. Cannot handle Netflix update.")
 			return False
@@ -493,12 +635,10 @@ class NetflixLocationUpdate:
 				return True
 			except Exception as e: # Catches TimeoutException, NoSuchElementException etc.
 				logging.error(f"Could not find or click the update button using selector: {button_selector}. Error: {e}", exc_info=True)
-				self._save_screenshot("button_fail")
 				return False
 
 		except Exception as e:
 			logging.error(f"Unhandled exception during Selenium handling: {e}", exc_info=True)
-			self._save_screenshot("selenium_error")
 			return False
 
 	def _netflix_login(self) -> bool:
@@ -523,7 +663,6 @@ class NetflixLocationUpdate:
 				# Example: Check for a common login error message element
 				self._driver.find_element(By.CSS_SELECTOR, '[data-uia="login-error-message"]')
 				logging.error("Login failed: Error message detected on page.")
-				self._save_screenshot("login_fail_message")
 				return False
 			except NoSuchElementException:
 				# No error message found, assume login might be proceeding
@@ -531,18 +670,7 @@ class NetflixLocationUpdate:
 			return True
 		except Exception as e: # Catch TimeoutException, NoSuchElementException etc.
 			logging.error(f"Error during Netflix login attempt: {e}", exc_info=True)
-			self._save_screenshot("login_element_fail")
 			return False
-
-	def _save_screenshot(self, prefix: str):
-		"""Saves a screenshot for debugging purposes."""
-		if not self._driver: return
-		try:
-			filename = f"{prefix}_debug_{datetime.datetime.now():%Y%m%d_%H%M%S}.png"
-			self._driver.save_screenshot(filename)
-			logging.info(f"Saved screenshot: {filename}")
-		except Exception as ss_err:
-			logging.error(f"Failed to save screenshot: {ss_err}")
 
 	def _manage_processed_email(self, email_id: bytes, uid: bytes):
 		"""Copies and/or marks an email for deletion based on config."""
@@ -602,9 +730,56 @@ class NetflixScheduler:
 		logging.info(f"Scheduler initialized with polling interval: {polling_interval_sec} seconds.")
 
 	def run(self):
-		"""Starts the polling loop."""
+		"""Starts the email monitoring loop (IDLE or polling based)."""
 		logging.info("Scheduler starting run loop.")
-		log_interval_seconds = 60 * 10 # Log status every 10 minutes
+		
+		# Check if IDLE is supported
+		idle_supported = self._location_updater._check_idle_support()
+		
+		if idle_supported:
+			logging.info("Using IMAP IDLE mode for instant email notifications")
+			self._run_with_idle()
+		else:
+			logging.info(f"Using polling mode (interval: {self._polling_interval_sec}s)")
+			self._run_with_polling()
+		
+		logging.info("Scheduler loop finished.")
+	
+	def _run_with_idle(self):
+		"""Runs the scheduler using IMAP IDLE for push notifications."""
+		log_interval_seconds = 60 * 10  # Log status every 10 minutes
+		last_status_log = datetime.datetime.now()
+		
+		while True:
+			try:
+				# Log status periodically
+				now = datetime.datetime.now()
+				if (now - last_status_log).total_seconds() >= log_interval_seconds:
+					logging.info("IDLE loop active. Waiting for email notifications...")
+					last_status_log = now
+				
+				# Wait for new email using IDLE (blocks until email arrives or timeout)
+				new_email = self._location_updater._wait_for_new_email_idle()
+				
+				# Process emails (whether new ones arrived or just timeout refresh)
+				self._location_updater.check_and_process_emails()
+				
+			except (imaplib.IMAP4.abort, imaplib.IMAP4.error, socket.error, BrokenPipeError, OSError) as e:
+				logging.warning(f"IMAP connection error in IDLE loop: {e}. Reconnecting...")
+				time.sleep(5)  # Brief pause before reconnect
+				
+			except KeyboardInterrupt:
+				logging.info("Keyboard interrupt received. Shutting down scheduler.")
+				break
+				
+			except Exception as e:
+				logging.error(f"Unexpected error in IDLE loop: {e}", exc_info=True)
+				logging.info("Waiting 30 seconds before continuing...")
+				time.sleep(30)
+	
+	def _run_with_polling(self):
+		"""Runs the scheduler using traditional polling."""
+		log_interval_seconds = 60 * 10  # Log status every 10 minutes
 
 		while True:
 			now = datetime.datetime.now()
@@ -636,8 +811,6 @@ class NetflixScheduler:
 			# Wait for the next poll cycle
 			# Subtract processing time? No, fixed interval is simpler.
 			time.sleep(self._polling_interval_sec)
-
-		logging.info("Scheduler loop finished.")
 		
 # --- Main Execution ---
 
