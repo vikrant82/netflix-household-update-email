@@ -261,9 +261,10 @@ class NetflixLocationUpdate:
 			except Exception:
 				pass  # Ignore if already selected
 			
-			# Check server capabilities (Gmail returns IDLE in capabilities)
+			# Check server capabilities (Gmail returns IDLE as string, not bytes)
 			capabilities = self._mail.capabilities
-			self._idle_supported = b'IDLE' in capabilities
+			# Check for both string and bytes version to be safe
+			self._idle_supported = b'IDLE' in capabilities or 'IDLE' in capabilities
 			
 			if self._idle_supported:
 				logging.info("IMAP server supports IDLE (push notifications)")
