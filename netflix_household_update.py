@@ -31,7 +31,8 @@ NETFLIX_LINK_START_PATTERNS = ['www.netflix.com/account/update-primary', 'www.ne
 BUTTON_SEARCH_ATTR_NAME = 'data-uia'
 BUTTON_SEARCH_ATTR_VALUE = 'set-primary-location-action'
 LOG_FILENAME = 'status.log'
-IMAP_IDLE_TIMEOUT_SECONDS = 28 * 60  # 28 minutes (IMAP max is 29)
+IMAP_IDLE_TIMEOUT_SECONDS = 15 * 60  # 15 minutes (shorter sessions to prevent hangs)
+IMAP_IDLE_MAX_FAILURES = 3  # Switch to polling after this many IDLE failures
 
 # --- Helper Functions ---
 def setup_logging():
@@ -73,6 +74,8 @@ class NetflixLocationUpdate:
 	_webdriver_creation_time: Optional[datetime.datetime] = None
 	_webdriver_max_age_seconds: int = 6 * 60 * 60  # 6 hours
 	_idle_supported: Optional[bool] = None  # Cache IDLE capability check
+	_idle_failure_count: int = 0  # Track consecutive IDLE failures
+	_idle_disabled: bool = False  # Disable IDLE after repeated failures
 
 	# Configuration attributes
 	_mailbox_name: str
@@ -340,6 +343,7 @@ class NetflixLocationUpdate:
 			
 			if new_email_arrived:
 				logging.info("IDLE detected new email(s)")
+				self._idle_failure_count = 0  # Reset failure count on success
 			else:
 				logging.debug("IDLE timeout reached, refreshing connection")
 			
@@ -347,6 +351,13 @@ class NetflixLocationUpdate:
 			
 		except Exception as e:
 			logging.error(f"Error during IMAP IDLE: {e}", exc_info=True)
+			self._idle_failure_count += 1
+			logging.warning(f"IDLE failure count: {self._idle_failure_count}/{IMAP_IDLE_MAX_FAILURES}")
+			
+			if self._idle_failure_count >= IMAP_IDLE_MAX_FAILURES:
+				logging.error(f"IDLE has failed {IMAP_IDLE_MAX_FAILURES} times. Disabling IDLE and falling back to polling.")
+				self._idle_disabled = True
+			
 			# Try to send DONE in case we're still in IDLE
 			try:
 				self._mail.send(b'DONE\r\n')
@@ -790,28 +801,37 @@ class NetflixScheduler:
 	_polling_interval_sec: int
 	_location_updater: NetflixLocationUpdate
 	_last_log_time: Optional[datetime.datetime]
+	_force_polling: bool
 
-	def __init__(self, polling_interval_sec: int, location_updater: NetflixLocationUpdate):
+	def __init__(self, polling_interval_sec: int, location_updater: NetflixLocationUpdate, force_polling: bool = False):
 		if polling_interval_sec < 1:
 			raise ValueError("Polling interval must be at least 1 second.")
 		self._polling_interval_sec = polling_interval_sec
 		self._location_updater = location_updater
 		self._last_log_time = None
+		self._force_polling = force_polling
 		logging.info(f"Scheduler initialized with polling interval: {polling_interval_sec} seconds.")
+		if force_polling:
+			logging.info("ForcePolling is enabled - will use polling mode regardless of IDLE support.")
 
 	def run(self):
 		"""Starts the email monitoring loop (IDLE or polling based)."""
 		logging.info("Scheduler starting run loop.")
 		
-		# Check if IDLE is supported
-		idle_supported = self._location_updater._check_idle_support()
-		
-		if idle_supported:
-			logging.info("Using IMAP IDLE mode for instant email notifications")
-			self._run_with_idle()
-		else:
-			logging.info(f"Using polling mode (interval: {self._polling_interval_sec}s)")
+		# Check if polling is forced via config
+		if self._force_polling:
+			logging.info(f"Using polling mode (forced by config, interval: {self._polling_interval_sec}s)")
 			self._run_with_polling()
+		else:
+			# Check if IDLE is supported
+			idle_supported = self._location_updater._check_idle_support()
+			
+			if idle_supported:
+				logging.info("Using IMAP IDLE mode for instant email notifications")
+				self._run_with_idle()
+			else:
+				logging.info(f"Using polling mode (interval: {self._polling_interval_sec}s)")
+				self._run_with_polling()
 		
 		logging.info("Scheduler loop finished.")
 	
@@ -821,6 +841,12 @@ class NetflixScheduler:
 		last_status_log = datetime.datetime.now()
 		
 		while True:
+			# Check if IDLE has been disabled due to repeated failures
+			if self._location_updater._idle_disabled:
+				logging.error("IDLE has been disabled. Switching to polling mode.")
+				self._run_with_polling()
+				return
+			
 			try:
 				# Log status periodically
 				now = datetime.datetime.now()
@@ -912,13 +938,15 @@ if __name__ == '__main__':
 	# The global updater_instance_for_signal_handling is used by signal handlers
 	current_updater_instance: Optional[NetflixLocationUpdate] = None
 	try:
-		# Read polling time from config or use default.
+		# Read config
 		config = configparser.ConfigParser()
 		config.read('config.ini')
 		polling_time = config.getint('GENERAL', 'PollingIntervalSeconds', fallback=5)
+		force_polling = config.getboolean('GENERAL', 'ForcePolling', fallback=False)
+		
 		current_updater_instance = NetflixLocationUpdate(config_path='config.ini')
 		updater_instance_for_signal_handling = current_updater_instance # Assign to global for signal handler
-		scheduler = NetflixScheduler(polling_interval_sec=polling_time, location_updater=current_updater_instance) # Pass correct instance
+		scheduler = NetflixScheduler(polling_interval_sec=polling_time, location_updater=current_updater_instance, force_polling=force_polling)
 		scheduler.run() # This call is blocking and will run until a signal or unhandled error.
 	except FileNotFoundError as e:
 		logging.error(f"Configuration error: {e}")
