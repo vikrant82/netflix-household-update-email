@@ -1,2 +1,1 @@
-selenium
-chromedriver_py
+playwright

@@ -1,3 +1,6 @@
 netflix_poller_service/
 config.ini
 *.log
+__pycache__/*
+status.log*
+config.ini
