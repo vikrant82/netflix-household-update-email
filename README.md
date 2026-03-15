@@ -43,26 +43,11 @@ playwright install chromium
 
 ### Configuration
 
-Edit `config.ini` with your credentials:
-
-```ini
-[GENERAL]
-MoveEmailsToMailbox = True
-MailboxName = Netflix
-PollingIntervalSeconds = 5
-ForcePolling = False
-
-[NETFLIX]
-Username = your_netflix_email@example.com
-Password = your_netflix_password
-
-[EMAIL]
-Username = your_gmail@gmail.com
-Password = your_gmail_app_password
-ImapServer = imap.gmail.com
-ImapPort = 993
-Mailbox = INBOX
+```bash
+cp config.ini.example config.ini
 ```
+
+Edit `config.ini` with your credentials (Netflix account + Gmail App Password).
 
 ### Run
 
