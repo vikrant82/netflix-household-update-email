@@ -3,4 +3,7 @@ config.ini
 *.log
 __pycache__/*
 status.log*
-config.ini
+.knowledge.md
+.venv/
+*.png
+*.html
