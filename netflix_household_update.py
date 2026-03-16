@@ -45,6 +45,9 @@ LOG_FILENAME = "status.log"
 IMAP_IDLE_TIMEOUT_SECONDS = 15 * 60  # 15 min per IDLE session
 IMAP_IDLE_MAX_FAILURES = 3
 IDLE_SOCKET_TIMEOUT = 1  # seconds — controls max SIGTERM response time
+IMAP_COMMAND_TIMEOUT = (
+    30  # seconds — timeout for non-IDLE IMAP commands (store, copy, etc.)
+)
 
 # Global shutdown event: set by signal handler, checked in all blocking loops
 shutdown_event = threading.Event()
@@ -132,6 +135,7 @@ class NetflixLocationUpdate:
             typ, data = self._mail.login(self._imap_username, self._imap_password)
             if typ == "OK":
                 logging.info(f"Connected to IMAP server {self._imap_server}")
+                self._mail.sock.settimeout(IMAP_COMMAND_TIMEOUT)
                 return True
             logging.error(f"IMAP login failed: {data}")
             self._mail = None
@@ -244,6 +248,9 @@ class NetflixLocationUpdate:
             except Exception:
                 pass
 
+            # Restore longer timeout for non-IDLE IMAP commands
+            self._mail.sock.settimeout(IMAP_COMMAND_TIMEOUT)
+
             if new_email_arrived:
                 self._idle_failure_count = 0
             return new_email_arrived
@@ -258,6 +265,10 @@ class NetflixLocationUpdate:
                 self._idle_disabled = True
             try:
                 self._mail.send(b"DONE\r\n")
+            except Exception:
+                pass
+            try:
+                self._mail.sock.settimeout(IMAP_COMMAND_TIMEOUT)
             except Exception:
                 pass
             return False
