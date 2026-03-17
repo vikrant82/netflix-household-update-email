@@ -18,6 +18,7 @@ import imaplib
 import email
 import time
 import socket
+import ssl
 import logging
 from logging.handlers import RotatingFileHandler
 import configparser
@@ -254,6 +255,20 @@ class NetflixLocationUpdate:
             if new_email_arrived:
                 self._idle_failure_count = 0
             return new_email_arrived
+
+        except (ssl.SSLEOFError, BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Connection drops are normal network events, not IDLE protocol failures.
+            # Don't count these toward _idle_failure_count.
+            logging.error(f"IDLE error: {e}", exc_info=True)
+            try:
+                self._mail.send(b"DONE\r\n")
+            except Exception:
+                pass
+            try:
+                self._mail.sock.settimeout(IMAP_COMMAND_TIMEOUT)
+            except Exception:
+                pass
+            return False
 
         except Exception as e:
             logging.error(f"IDLE error: {e}", exc_info=True)
