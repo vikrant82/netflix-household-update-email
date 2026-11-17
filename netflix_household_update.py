@@ -259,7 +259,7 @@ class NetflixLocationUpdate:
         except (ssl.SSLEOFError, BrokenPipeError, ConnectionResetError, OSError) as e:
             # Connection drops are normal network events, not IDLE protocol failures.
             # Don't count these toward _idle_failure_count.
-            logging.error(f"IDLE error: {e}", exc_info=True)
+            logging.info(f"IDLE connection dropped (normal network event): {e}")
             try:
                 self._mail.send(b"DONE\r\n")
             except Exception:
@@ -413,8 +413,14 @@ class NetflixLocationUpdate:
         else:
             is_from_sender = any(s in parsed.get("From", "") for s in SENDER_EMAILS)
             if is_from_sender:
-                logging.warning(
-                    f"UID {uid.decode()}: Netflix email but no update link found."
+                subject = (
+                    str(parsed.get("Subject", "No Subject"))
+                    .replace("\n", "")
+                    .replace("\r", "")
+                )
+                logging.info(
+                    f"UID {uid.decode()}: Netflix email but no update link found. "
+                    f"Likely a confirmation email (Subject: '{subject}')."
                 )
 
         try:
