@@ -36,11 +36,21 @@ NETFLIX_LINK_START_PATTERNS = [
     "www.netflix.com/account/update-primary",
     "www.netflix.com/account/set-primary",
 ]
-BUTTON_SELECTOR = 'button[data-uia="set-primary-location-action"]'
-LOGIN_EMAIL_SELECTOR = 'input[name="userLoginId"]'
-LOGIN_PASSWORD_SELECTOR = 'input[name="password"]'
-LOGIN_SUBMIT_SELECTOR = 'button[data-uia="login-submit-button"]'
-LOGIN_ERROR_SELECTOR = '[data-uia="login-error-message"]'
+BUTTON_SELECTOR = (
+    '[data-uia="set-primary-location-action"], '
+    '[data-uia="confirm-primary-location-action"], '
+    '[data-uia="update-primary-location-action"], '
+    'button:has-text("Confirm Update"), '
+    'a:has-text("Confirm Update"), '
+    'span[role="button"]:has-text("Confirm Update"), '
+    'div[role="button"]:not(:has(button, a)):has-text("Confirm Update"), '
+    'button:has-text("Yes, This Was Me"), '
+    'a:has-text("Yes, This Was Me")'
+)
+LOGIN_EMAIL_SELECTOR = 'input[name="userLoginId"], input[data-uia="field-userLoginId"], input[data-uia="login-field"]'
+LOGIN_PASSWORD_SELECTOR = 'input[name="password"], input[data-uia="field-password"], input[data-uia="password-field"]'
+LOGIN_SUBMIT_SELECTOR = 'button[data-uia="login-submit-button"], button[data-uia="continue-button"], button[type="submit"]:has-text("Sign In"), button[type="submit"]:has-text("Continue")'
+LOGIN_ERROR_SELECTOR = '[data-uia="login-error-message"], [data-uia="error-message-container"]'
 
 LOG_FILENAME = "status.log"
 IMAP_IDLE_TIMEOUT_SECONDS = 15 * 60  # 15 min per IDLE session
@@ -55,6 +65,50 @@ shutdown_event = threading.Event()
 
 
 # --- Logging ---
+def _redact_url(url: str) -> str:
+    """Hide Netflix confirmation tokens before URLs enter logs."""
+    return re.sub(r"nftoken=[^&\s]+", "nftoken=REDACTED", url, flags=re.IGNORECASE)
+
+
+def _log_page_diagnostics(page):
+    """Log bounded, visible-page context without exposing input values."""
+    try:
+        final_url = _redact_url(page.url)
+    except Exception:
+        final_url = "<unavailable>"
+    try:
+        title = page.title()
+    except Exception:
+        title = "<unavailable>"
+    logging.info("Playwright diagnostics: url=%s title=%r", final_url, title)
+
+    try:
+        elements = page.locator(
+            'button, a, input, [role="button"], [data-uia]'
+        ).locator("visible=true")
+        count = min(elements.count(), 15)
+    except Exception:
+        return
+
+    for index in range(count):
+        try:
+            details = elements.nth(index).evaluate(
+                """element => ({
+                    tag: element.tagName.toLowerCase(),
+                    uia: element.getAttribute('data-uia'),
+                    role: element.getAttribute('role'),
+                    name: element.getAttribute('aria-label') ||
+                        element.getAttribute('name') ||
+                        element.getAttribute('placeholder'),
+                    text: (element.innerText || element.textContent || '')
+                        .trim().slice(0, 80)
+                })"""
+            )
+            logging.info("Visible DOM element %d: %s", index + 1, details)
+        except Exception:
+            continue
+
+
 def setup_logging():
     """Configures logging with rotation (10 MB, 5 backups)."""
     handler = RotatingFileHandler(
@@ -549,28 +603,82 @@ class NetflixLocationUpdate:
             page = context.new_page()
             try:
                 page.goto(update_link, timeout=15000, wait_until="domcontentloaded")
-                logging.info(f"Page loaded: {page.url}")
+                logging.info("Page loaded: %s", _redact_url(page.url))
 
-                # Check if login is needed
-                login_field = page.locator(LOGIN_EMAIL_SELECTOR)
-                if login_field.is_visible(timeout=3000):
+                page.locator(
+                    f"{BUTTON_SELECTOR}, {LOGIN_EMAIL_SELECTOR}"
+                ).locator("visible=true").first.wait_for(
+                    state="visible", timeout=10000
+                )
+
+                login_field = page.locator(LOGIN_EMAIL_SELECTOR).locator(
+                    "visible=true"
+                ).first
+                button = page.locator(BUTTON_SELECTOR).locator("visible=true").first
+                if login_field.is_visible() and not button.is_visible():
                     logging.info("Login required. Entering credentials...")
                     login_field.fill(self._netflix_username)
-                    page.locator(LOGIN_PASSWORD_SELECTOR).fill(self._netflix_password)
-                    page.locator(LOGIN_SUBMIT_SELECTOR).click()
-                    page.wait_for_load_state("networkidle", timeout=10000)
 
-                    error = page.locator(LOGIN_ERROR_SELECTOR)
-                    if error.is_visible(timeout=2000):
+                    password_field = page.locator(LOGIN_PASSWORD_SELECTOR).locator(
+                        "visible=true"
+                    ).first
+                    if not password_field.is_visible():
+                        page.locator(LOGIN_SUBMIT_SELECTOR).locator(
+                            "visible=true"
+                        ).first.click()
+                        password_field.wait_for(state="visible", timeout=10000)
+
+                    password_field.fill(self._netflix_password)
+                    page.locator(LOGIN_SUBMIT_SELECTOR).locator(
+                        "visible=true"
+                    ).first.click()
+
+                    try:
+                        page.locator(
+                            f"{BUTTON_SELECTOR}, {LOGIN_ERROR_SELECTOR}"
+                        ).locator("visible=true").first.wait_for(
+                            state="visible", timeout=10000
+                        )
+                    except Exception:
+                        pass
+
+                    error = page.locator(LOGIN_ERROR_SELECTOR).locator(
+                        "visible=true"
+                    ).first
+                    if error.is_visible() and not button.is_visible():
                         logging.error("Netflix login failed!")
+                        try:
+                            page.screenshot(path="playwright_error.png")
+                            logging.info(
+                                "Error screenshot saved to playwright_error.png"
+                            )
+                        except Exception:
+                            pass
+                        _log_page_diagnostics(page)
                         return False
-                    logging.info("Login successful")
+                    if button.is_visible():
+                        logging.info("Login successful")
 
-                # Click the update button
-                button = page.locator(BUTTON_SELECTOR)
                 button.wait_for(state="visible", timeout=10000)
+                try:
+                    metadata = button.evaluate(
+                        """element => ({
+                            tag: element.tagName.toLowerCase(),
+                            'data-uia': element.getAttribute('data-uia'),
+                            role: element.getAttribute('role'),
+                            text: (element.innerText || element.textContent || '')
+                                .trim().slice(0, 80)
+                        })"""
+                    )
+                    logging.info("Matched CTA metadata: %s", metadata)
+                except Exception:
+                    pass
                 logging.info("Update button found. Clicking...")
                 button.click()
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
                 page.wait_for_timeout(1000)
                 logging.info("Successfully clicked the update button!")
                 return True
@@ -582,6 +690,7 @@ class NetflixLocationUpdate:
                     logging.info("Error screenshot saved to playwright_error.png")
                 except Exception:
                     pass
+                _log_page_diagnostics(page)
                 return False
             finally:
                 context.close()
